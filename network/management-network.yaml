@@ -1,0 +1,85 @@
+# network/management-network.yaml
+# Static IP assignments for the VM cluster.
+#
+# Two fabrics:
+#   * Management:  192.168.1.0/24  (libvirt bridge on the hosts, VM management NICs)
+#   * Fabric:      10.0.0.0/24     (InfiniBand; carried by host ib0, VMs bridge onto it)
+
+nodes:
+  # --- Control plane -------------------------------------------------------
+  - hostname: cogniforge-cp
+    role: master
+    host: host-1
+    management_ip: 192.168.1.10
+    fabric_ip: 10.0.0.10
+
+  # --- GPU workers on physical host A --------------------------------------
+  - hostname: cogniforge-worker-01
+    role: worker
+    host: host-1
+    management_ip: 192.168.1.11
+    fabric_ip: 10.0.0.11
+    gpu: "0000:31:00.0"
+
+  - hostname: cogniforge-worker-02
+    role: worker
+    host: host-1
+    management_ip: 192.168.1.12
+    fabric_ip: 10.0.0.12
+    gpu: "0000:32:00.0"
+
+  - hostname: cogniforge-worker-03
+    role: worker
+    host: host-1
+    management_ip: 192.168.1.13
+    fabric_ip: 10.0.0.13
+    gpu: "0000:33:00.0"
+
+  - hostname: cogniforge-worker-04
+    role: worker
+    host: host-1
+    management_ip: 192.168.1.14
+    fabric_ip: 10.0.0.14
+    gpu: "0000:34:00.0"
+
+  # --- GPU workers on physical host B --------------------------------------
+  - hostname: cogniforge-worker-05
+    role: worker
+    host: host-2
+    management_ip: 192.168.1.15
+    fabric_ip: 10.0.0.15
+    gpu: "0000:31:00.0"
+
+  - hostname: cogniforge-worker-06
+    role: worker
+    host: host-2
+    management_ip: 192.168.1.16
+    fabric_ip: 10.0.0.16
+    gpu: "0000:32:00.0"
+
+  - hostname: cogniforge-worker-07
+    role: worker
+    host: host-2
+    management_ip: 192.168.1.17
+    fabric_ip: 10.0.0.17
+    gpu: "0000:33:00.0"
+
+  - hostname: cogniforge-worker-08
+    role: worker
+    host: host-2
+    management_ip: 192.168.1.18
+    fabric_ip: 10.0.0.18
+    gpu: "0000:34:00.0"
+
+# --- Services (control plane) ----------------------------------------------
+services:
+  rke2_server:
+    endpoint: https://cogniforge-cp:9345
+  argo_workflows:
+    endpoint: https://argo.cogniforge.local:2746
+  rack_engine_api:
+    endpoint: http://cogniforge-cp:8000
+  grafana:
+    endpoint: http://cogniforge-cp:3000
+  prometheus:
+    endpoint: http://cogniforge-cp:9090

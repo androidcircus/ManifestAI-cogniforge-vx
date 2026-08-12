@@ -1,0 +1,582 @@
+--- /dev/null	2026-08-12 02:23:05.000000000 -0400
++++ b/hw/misc/cogniforge-gpu.c	2026-08-12 02:14:52.458796300 -0400
+@@ -0,0 +1,357 @@
++/*
++ * provisioning/emulator/cogniforge-gpu.c
++ *
++ * OPTIONAL experiment: a QEMU PCI device model for an emulated compute
++ * accelerator ("CogniForge GPU"). The guest sees a PCI 3D controller with:
++ *
++ *   BAR0  MMIO      - control/status registers (32-bit window)
++ *   BAR2  MMIO      - doorbell: write target SM id to trigger a "kernel kick"
++ *   BAR4  MMIO      - VRAM: plain RAM window sized by the vram_size property
++ *
++ * This device emulates the guest contract (BAR layout, doorbell trap, status
++ * registers) AND performs REAL compute: writing a command block into VRAM and
++ * poking REG_CMD makes the device run a real FP32 matrix multiply-accumulate
++ * (GEMM) on the host CPU (cogniforge-gemm.c, scalar + AVX-512 kernels) with
++ * operands read from its own VRAM. It does NOT run the ~14B Wan 2.1 diffusion
++ * model - that runs on real NVIDIA GPUs via the cluster in /kubernetes and
++ * /modules; this device provides the tensor-operation test bed.
++ *
++ * MMA command protocol (guest driver contract):
++ *   - place a CogniForgeMmaCmd struct at VRAM offset 0 (see REG_CMD comment)
++ *   - write 1 to REG_CMD (BAR0 + 0x10) to execute it synchronously
++ *   - poll REG_STATUS: bit1 busy, bit0 ready, bit31 error
++ *   - read REG_CMD_RESULT (BAR0 + 0x14) for the GEMM return code
++ *   - verify standalone: provisioning/emulator/test-gemm.sh (no QEMU needed)
++ *   - verify end-to-end: provisioning/emulator/test-device-gemm.py drives the
++ *     device over QEMU's qtest protocol (PCI scan, BAR program, VRAM writes,
++ *     REG_CMD trigger) with no guest OS
++ *
++ * Build (verified against qemu-11.0.3, apply provisioning/emulator patch):
++ *   cd qemu-11.0.3 && patch -p1 < cogniforge-qemu-11.0.3.patch
++ *   mkdir build && cd build
++ *   ../configure --target-list=x86_64-softmmu --prefix=/mingw64 \
++ *     --disable-werror --disable-docs --disable-gtk --disable-sdl \
++ *     --disable-curses --disable-gnutls --disable-nettle --disable-gcrypt \
++ *     --disable-virglrenderer --disable-opengl --disable-debug-info
++ *   ninja qemu-system-x86_64.exe
++ *
++ * QEMU 11 API notes (why the code looks the way it does):
++ *   - properties array must be 'static const Property' and needs no
++ *     DEFINE_PROP_END_OF_LIST() terminator (size is checked at runtime)
++ *   - include "hw/core/qdev-properties.h" (moved in QEMU 11)
++ *   - use device_class_set_legacy_reset() instead of dc->reset
++ *   - class_init takes (ObjectClass *, const void *)
++ *   - .interfaces must declare INTERFACE_CONVENTIONAL_PCI_DEVICE /
++ *     INTERFACE_PCIE_DEVICE or PCI class init aborts
++ *
++ * Run:
++ *   qemu-system-x86_64 ... -device cogniforge-gpu,sm_count=256,vram_size=2G
++ *   (vram_size is a plain integer; 'M'/'G' suffixes are not accepted)
++ */
++#include "qemu/osdep.h"
++#include "hw/pci/pci_device.h"
++#include "hw/pci/pci.h"
++#include "hw/core/qdev-properties.h"
++#include "qemu/units.h"
++#include "qemu/log.h"
++#include "qemu/error-report.h"
++#include "qapi/error.h"
++#include "qom/object.h"
++#include "hw/misc/cogniforge-gemm.h"
++
++#define TYPE_COGNIFORGE_GPU "cogniforge-gpu"
++OBJECT_DECLARE_SIMPLE_TYPE(CogniForgeGPUState, COGNIFORGE_GPU)
++
++#define COGNIFORGE_VENDOR_ID   0x1aef     /* example vendor */
++#define COGNIFORGE_DEVICE_ID   0xce1a
++#define COGNIFORGE_CLASS       PCI_CLASS_DISPLAY_3D
++
++/* Register offsets (BAR0) */
++#define REG_STATUS        0x00   /* bit0 ready, bit1 busy, bit31 error */
++#define REG_SM_COUNT      0x04   /* streaming multiprocessors reported */
++#define REG_VRAM_SIZE     0x08   /* VRAM bytes exposed by BAR4 */
++#define REG_VERSION       0x0c
++#define REG_CMD           0x10   /* write 1: execute MMA cmd block in VRAM */
++#define REG_CMD_RESULT    0x14   /* last GEMM return code (signed) */
++
++/* MMA command block, placed by the guest at VRAM offset 0. Offsets are byte
++ * offsets into the device's own VRAM (BAR4) and must be 4-byte aligned. */
++#define COGNIFORGE_MMA_MAGIC 0x43474745u  /* 'CGGE' */
++
++typedef struct CogniForgeMmaCmd {
++    uint32_t magic;
++    uint32_t m, n, k;
++    uint32_t lda, ldb, ldc;    /* row strides in float elements */
++    uint64_t a_off, b_off, c_off;
++    uint32_t flags;            /* COGNIFORGE_GEMM_ACCUM to accumulate */
++    uint32_t reserved;
++} QEMU_PACKED CogniForgeMmaCmd;
++
++/* Doorbell (BAR2) value encoding: low 32 = sm_id, high 32 = command */
++#define DOORBELL_CMD_RUN  0x1
++
++typedef struct CogniForgeGPUState {
++    PCIDevice parent_obj;
++
++    MemoryRegion mmio;       /* BAR0 */
++    MemoryRegion doorbell;   /* BAR2 */
++    MemoryRegion vram;       /* BAR4 */
++
++    uint64_t vram_size;      /* property, bytes */
++    uint32_t sm_count;       /* property */
++
++    uint32_t status;
++    uint32_t version;
++    int32_t cmd_result;      /* last MMA/GEMM return code */
++} CogniForgeGPUState;
++
++/* ------------------------------------------------------------------ */
++/* BAR0 - MMIO control window                                         */
++/* ------------------------------------------------------------------ */
++static void cogniforge_gpu_exec_mma(CogniForgeGPUState *s);
++
++static uint64_t cogniforge_mmio_read(void *opaque, hwaddr addr, unsigned size)
++{
++    CogniForgeGPUState *s = opaque;
++    uint32_t val = 0;
++
++    switch (addr) {
++    case REG_STATUS:
++        val = s->status;
++        break;
++    case REG_SM_COUNT:
++        val = s->sm_count;
++        break;
++    case REG_VRAM_SIZE:
++        val = (uint32_t)(s->vram_size & 0xffffffff);
++        break;
++    case REG_VERSION:
++        val = s->version;
++        break;
++    case REG_CMD_RESULT:
++        val = (uint32_t)s->cmd_result;
++        break;
++    default:
++        qemu_log_mask(LOG_GUEST_ERROR, "cogniforge-gpu: bad MMIO read @%#"PRIx64"\n",
++                      addr);
++        break;
++    }
++    return val;
++}
++
++static void cogniforge_mmio_write(void *opaque, hwaddr addr, uint64_t val,
++                                  unsigned size)
++{
++    CogniForgeGPUState *s = opaque;
++
++    switch (addr) {
++    case REG_STATUS:
++        /* guest may clear the error bit */
++        s->status &= ~(val & (1u << 31));
++        break;
++    case REG_CMD:
++        if (val & 1u) {
++            cogniforge_gpu_exec_mma(s);
++        }
++        break;
++    default:
++        qemu_log_mask(LOG_GUEST_ERROR, "cogniforge-gpu: bad MMIO write @%#"PRIx64
++                      " = %#"PRIx64"\n", addr, val);
++        break;
++    }
++}
++
++/* ------------------------------------------------------------------ */
++/* MMA command execution - REAL compute via cogniforge-gemm.c          */
++/* ------------------------------------------------------------------ */
++static void cogniforge_gpu_exec_mma(CogniForgeGPUState *s)
++{
++    uint8_t *vram;
++    CogniForgeMmaCmd *cmd;
++    CogniForgeGemmDesc gd;
++    uint64_t a_end, b_end, c_end;
++    int rc;
++
++    if (s->status & (1u << 1)) {
++        return;                     /* still busy */
++    }
++    vram = memory_region_get_ram_ptr(&s->vram);
++    cmd = (CogniForgeMmaCmd *)vram;
++
++    if (cmd->magic != COGNIFORGE_MMA_MAGIC) {
++        s->cmd_result = COGNIFORGE_GEMM_BAD_PARAMS;
++        s->status |= (1u << 31);
++        return;
++    }
++
++    /* Bounds check every operand against the VRAM window (overflow-safe). */
++    if (__builtin_mul_overflow((uint64_t)cmd->m - 1, cmd->lda, &a_end) ||
++        __builtin_add_overflow(a_end, cmd->k, &a_end) ||
++        __builtin_add_overflow(cmd->a_off, a_end * 4, &a_end) ||
++        a_end > s->vram_size) {
++        rc = COGNIFORGE_GEMM_BAD_PARAMS;
++        goto fail;
++    }
++    if (__builtin_mul_overflow((uint64_t)cmd->k - 1, cmd->ldb, &b_end) ||
++        __builtin_add_overflow(b_end, cmd->n, &b_end) ||
++        __builtin_add_overflow(cmd->b_off, b_end * 4, &b_end) ||
++        b_end > s->vram_size) {
++        rc = COGNIFORGE_GEMM_BAD_PARAMS;
++        goto fail;
++    }
++    if (__builtin_mul_overflow((uint64_t)cmd->m - 1, cmd->ldc, &c_end) ||
++        __builtin_add_overflow(c_end, cmd->n, &c_end) ||
++        __builtin_add_overflow(cmd->c_off, c_end * 4, &c_end) ||
++        c_end > s->vram_size) {
++        rc = COGNIFORGE_GEMM_BAD_PARAMS;
++        goto fail;
++    }
++
++    s->status |= (1u << 1);         /* busy */
++    gd = (CogniForgeGemmDesc){
++        .m = cmd->m, .n = cmd->n, .k = cmd->k,
++        .lda = cmd->lda, .ldb = cmd->ldb, .ldc = cmd->ldc,
++        .a = (const float *)(vram + cmd->a_off),
++        .b = (const float *)(vram + cmd->b_off),
++        .c = (float *)(vram + cmd->c_off),
++        .flags = cmd->flags,
++    };
++    rc = cogniforge_gemm(&gd);
++    s->status &= ~(1u << 1);        /* busy clear */
++    if (rc == COGNIFORGE_GEMM_OK) {
++        s->cmd_result = 0;
++        s->status |= 1u;            /* ready */
++        s->status &= ~(1u << 31);
++    } else {
++        s->cmd_result = rc;
++        s->status |= (1u << 31);
++    }
++    return;
++
++fail:
++    s->cmd_result = rc;
++    s->status |= (1u << 31);
++}
++
++static const MemoryRegionOps cogniforge_mmio_ops = {
++    .read  = cogniforge_mmio_read,
++    .write = cogniforge_mmio_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++};
++
++/* ------------------------------------------------------------------ */
++/* BAR2 - doorbell                                                     */
++/* ------------------------------------------------------------------ */
++static uint64_t cogniforge_doorbell_read(void *opaque, hwaddr addr, unsigned size)
++{
++    CogniForgeGPUState *s = opaque;
++    return (uint64_t)s->sm_count;   /* dummy: guest can poll readiness */
++}
++
++static void cogniforge_doorbell_write(void *opaque, hwaddr addr, uint64_t val,
++                                      unsigned size)
++{
++    CogniForgeGPUState *s = opaque;
++    uint32_t cmd = (uint32_t)(val >> 32);
++    uint32_t sm_id = (uint32_t)(val & 0xffffffff);
++
++    if (sm_id >= s->sm_count) {
++        s->status |= (1u << 31);
++        return;
++    }
++    switch (cmd) {
++    case DOORBELL_CMD_RUN:
++        s->status |= 1u;               /* ready */
++        s->status &= ~(1u << 1);       /* clear busy */
++        break;
++    default:
++        qemu_log_mask(LOG_GUEST_ERROR,
++                      "cogniforge-gpu: unknown doorbell cmd %#x\n", cmd);
++        break;
++    }
++}
++
++static const MemoryRegionOps cogniforge_doorbell_ops = {
++    .read  = cogniforge_doorbell_read,
++    .write = cogniforge_doorbell_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++};
++
++/* ------------------------------------------------------------------ */
++/* PCI lifecycle                                                       */
++/* ------------------------------------------------------------------ */
++static void cogniforge_gpu_reset(DeviceState *dev)
++{
++    CogniForgeGPUState *s = COGNIFORGE_GPU(dev);
++    s->status = 0;
++    s->cmd_result = 0;
++}
++
++static void cogniforge_gpu_realize(PCIDevice *pci_dev, Error **errp)
++{
++    CogniForgeGPUState *s = COGNIFORGE_GPU(pci_dev);
++
++    if (s->sm_count == 0) {
++        s->sm_count = 1;
++    }
++    if (s->vram_size == 0) {
++        s->vram_size = 256 * MiB;
++    }
++    s->version = 0x0200;  /* 0x0200: adds MMA/GEMM command on REG_CMD */
++
++    pci_set_word(pci_dev->config + PCI_VENDOR_ID, COGNIFORGE_VENDOR_ID);
++    pci_set_word(pci_dev->config + PCI_DEVICE_ID, COGNIFORGE_DEVICE_ID);
++    pci_set_word(pci_dev->config + PCI_CLASS_DEVICE, COGNIFORGE_CLASS);
++    pci_set_word(pci_dev->config + PCI_COMMAND,
++                 PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER);
++
++    memory_region_init_io(&s->mmio, OBJECT(s), &cogniforge_mmio_ops, s,
++                          "cogniforge-gpu-mmio", 0x1000);
++    memory_region_init_io(&s->doorbell, OBJECT(s), &cogniforge_doorbell_ops,
++                          s, "cogniforge-gpu-doorbell", 0x1000);
++    memory_region_init_ram(&s->vram, OBJECT(s), "cogniforge-gpu-vram",
++                           s->vram_size, errp);
++    if (*errp) {
++        return;
++    }
++
++    pci_register_bar(pci_dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->mmio);
++    pci_register_bar(pci_dev, 2, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->doorbell);
++    pci_register_bar(pci_dev, 4, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->vram);
++}
++
++static const Property cogniforge_gpu_properties[] = {
++    DEFINE_PROP_UINT32("sm_count", CogniForgeGPUState, sm_count, 256),
++    DEFINE_PROP_UINT64("vram_size", CogniForgeGPUState, vram_size, 2 * GiB),
++};
++
++static void cogniforge_gpu_class_init(ObjectClass *klass, const void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
++
++    k->realize = cogniforge_gpu_realize;
++    k->exit = NULL;
++    device_class_set_legacy_reset(dc, cogniforge_gpu_reset);
++    device_class_set_props(dc, cogniforge_gpu_properties);
++    dc->desc = "CogniForge emulated compute accelerator";
++}
++
++static const TypeInfo cogniforge_gpu_info = {
++    .name = TYPE_COGNIFORGE_GPU,
++    .parent = TYPE_PCI_DEVICE,
++    .instance_size = sizeof(CogniForgeGPUState),
++    .class_init = cogniforge_gpu_class_init,
++    .interfaces = (InterfaceInfo[]) {
++        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
++        { INTERFACE_PCIE_DEVICE },
++        { },
++    },
++};
++
++static void cogniforge_gpu_register_types(void)
++{
++    type_register_static(&cogniforge_gpu_info);
++}
++
++type_init(cogniforge_gpu_register_types)
+--- /dev/null	2026-08-12 02:23:04.000000000 -0400
++++ b/hw/misc/cogniforge-gemm.h	2026-08-12 01:41:26.878502100 -0400
+@@ -0,0 +1,52 @@
++/*
++ * provisioning/emulator/cogniforge-gemm.h
++ *
++ * CogniForge emulated tensor-core API: a self-contained FP32 SGEMM.
++ *
++ * Compiled into QEMU as part of the cogniforge-gpu device model, and also
++ * usable standalone (see test-gemm.c) so the math can be verified without
++ * building QEMU at all.
++ */
++#ifndef COGNIFORGE_GEMM_H
++#define COGNIFORGE_GEMM_H
++
++#include <stdint.h>
++#include <stddef.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/*
++ * Row-major FP32 GEMM:  C[m x n] = A[m x k] * B[k x n]
++ * Optionally accumulates into C (C = A*B + C) when COGNIFORGE_GEMM_ACCUM is
++ * set in ->flags.  lda / ldb / ldc are row strides in float elements, so the
++ * kernels can operate on padded or transposed buffers.
++ */
++#define COGNIFORGE_GEMM_ACCUM (1u << 0)
++
++typedef struct CogniForgeGemmDesc {
++    uint32_t m, n, k;
++    uint32_t lda, ldb, ldc;
++    const float *a;
++    const float *b;
++    float *c;
++    uint32_t flags;
++} CogniForgeGemmDesc;
++
++enum {
++    COGNIFORGE_GEMM_OK = 0,
++    COGNIFORGE_GEMM_BAD_PARAMS = -1,   /* null desc / zero dims / bad strides */
++    COGNIFORGE_GEMM_DIM_TOO_LARGE = -2,/* dimension above COGNIFORGE_GEMM_MAX_DIM */
++};
++
++#define COGNIFORGE_GEMM_MAX_DIM 4096
++
++/* Returns COGNIFORGE_GEMM_OK or a negative error code. */
++int cogniforge_gemm(const CogniForgeGemmDesc *d);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* COGNIFORGE_GEMM_H */
+\ No newline at end of file
+--- /dev/null	2026-08-12 02:23:05.000000000 -0400
++++ b/hw/misc/cogniforge-gemm.c	2026-08-12 01:42:06.918543300 -0400
+@@ -0,0 +1,139 @@
++/*
++ * provisioning/emulator/cogniforge-gemm.c
++ *
++ * CogniForge emulated tensor-core backend: a self-contained FP32 SGEMM.
++ *
++ * This is REAL compute - the loop nests below execute on the host CPU and
++ * write results back into the device's VRAM.  Two kernels are provided:
++ *
++ *   - a portable scalar/saxpy kernel (always compiled)
++ *   - an AVX-512 FMA kernel (compiled only when the TU is built with
++ *     __AVX512F__, i.e. -mavx512f or -march matching AVX-512), selected at
++ *     runtime only when the host CPU advertises avx512f.
++ *
++ * Care is taken so this file has no QEMU dependencies: only the C runtime.
++ */
++#include "cogniforge-gemm.h"
++
++#include <string.h>
++
++#if defined(__AVX512F__)
++#include <immintrin.h>
++#endif
++
++/* ------------------------------------------------------------------ */
++/* Portable scalar kernel (saxpy form: cache friendly, correct)        */
++/* ------------------------------------------------------------------ */
++static void gemm_scalar(const CogniForgeGemmDesc *d)
++{
++    const float *a = d->a;
++    const float *b = d->b;
++    float *c = d->c;
++    const uint32_t m = d->m;
++    const uint32_t n = d->n;
++    const uint32_t k = d->k;
++    const uint32_t lda = d->lda;
++    const uint32_t ldb = d->ldb;
++    const uint32_t ldc = d->ldc;
++
++    if (!(d->flags & COGNIFORGE_GEMM_ACCUM)) {
++        for (uint32_t i = 0; i < m; i++) {
++            float *crow = c + (uint64_t)i * ldc;
++            memset(crow, 0, (size_t)n * sizeof(float));
++        }
++    }
++
++    for (uint32_t i = 0; i < m; i++) {
++        const float *arow = a + (uint64_t)i * lda;
++        float *crow = c + (uint64_t)i * ldc;
++        for (uint32_t p = 0; p < k; p++) {
++            const float aval = arow[p];
++            const float *brow = b + (uint64_t)p * ldb;
++            for (uint32_t j = 0; j < n; j++) {
++                crow[j] += aval * brow[j];
++            }
++        }
++    }
++}
++
++#if defined(__AVX512F__)
++/* ------------------------------------------------------------------ */
++/* AVX-512 FMA kernel: 16-wide saxpy over the n axis                   */
++/* ------------------------------------------------------------------ */
++static void gemm_avx512(const CogniForgeGemmDesc *d)
++{
++    const float *a = d->a;
++    const float *b = d->b;
++    float *c = d->c;
++    const uint32_t m = d->m;
++    const uint32_t n = d->n;
++    const uint32_t k = d->k;
++    const uint32_t lda = d->lda;
++    const uint32_t ldb = d->ldb;
++    const uint32_t ldc = d->ldc;
++
++    if (!(d->flags & COGNIFORGE_GEMM_ACCUM)) {
++        for (uint32_t i = 0; i < m; i++) {
++            float *crow = c + (uint64_t)i * ldc;
++            memset(crow, 0, (size_t)n * sizeof(float));
++        }
++    }
++
++    for (uint32_t i = 0; i < m; i++) {
++        const float *arow = a + (uint64_t)i * lda;
++        float *crow = c + (uint64_t)i * ldc;
++        for (uint32_t p = 0; p < k; p++) {
++            const __m512 aval = _mm512_set1_ps(arow[p]);
++            const float *brow = b + (uint64_t)p * ldb;
++            uint32_t j;
++            for (j = 0; j + 16 <= n; j += 16) {
++                __m512 acc = _mm512_loadu_ps(crow + j);
++                acc = _mm512_fmadd_ps(aval, _mm512_loadu_ps(brow + j), acc);
++                _mm512_storeu_ps(crow + j, acc);
++            }
++            for (; j < n; j++) {
++                crow[j] += arow[p] * brow[j];
++            }
++        }
++    }
++}
++
++static int host_has_avx512f(void)
++{
++#if defined(__GNUC__) || defined(__clang__)
++    return __builtin_cpu_supports("avx512f");
++#else
++    return 0;
++#endif
++}
++#endif /* __AVX512F__ */
++
++/* ------------------------------------------------------------------ */
++/* Entry point                                                         */
++/* ------------------------------------------------------------------ */
++int cogniforge_gemm(const CogniForgeGemmDesc *d)
++{
++    if (d == NULL || d->a == NULL || d->b == NULL || d->c == NULL) {
++        return COGNIFORGE_GEMM_BAD_PARAMS;
++    }
++    if (d->m == 0 || d->n == 0 || d->k == 0) {
++        return COGNIFORGE_GEMM_BAD_PARAMS;
++    }
++    if (d->m > COGNIFORGE_GEMM_MAX_DIM ||
++        d->n > COGNIFORGE_GEMM_MAX_DIM ||
++        d->k > COGNIFORGE_GEMM_MAX_DIM) {
++        return COGNIFORGE_GEMM_DIM_TOO_LARGE;
++    }
++    if (d->lda < d->k || d->ldb < d->n || d->ldc < d->n) {
++        return COGNIFORGE_GEMM_BAD_PARAMS;
++    }
++
++#if defined(__AVX512F__)
++    if (host_has_avx512f()) {
++        gemm_avx512(d);
++        return COGNIFORGE_GEMM_OK;
++    }
++#endif
++    gemm_scalar(d);
++    return COGNIFORGE_GEMM_OK;
++}
+\ No newline at end of file
+--- a/hw/misc/meson.build	2026-08-12 02:05:49.431334500 -0400
++++ b/hw/misc/meson.build	2026-08-12 01:47:37.391910900 -0400
+@@ -9,6 +9,7 @@
+ system_ss.add(when: 'CONFIG_EMPTY_SLOT', if_true: files('empty_slot.c'))
+ system_ss.add(when: 'CONFIG_LED', if_true: files('led.c'))
+ system_ss.add(when: 'CONFIG_PVPANIC_COMMON', if_true: files('pvpanic.c'))
++system_ss.add(files('cogniforge-gemm.c', 'cogniforge-gpu.c'))
+ 
+ # ARM devices
+ system_ss.add(when: 'CONFIG_PL310', if_true: files('arm_l2x0.c'))
+--- a/meson.build	2026-08-12 02:10:13.994677500 -0400
++++ b/meson.build	2026-08-12 02:10:14.068899800 -0400
+@@ -15,7 +15,9 @@
+ add_test_setup('thorough',
+                env: ['G_TEST_SLOW=1', 'SPEED=thorough', 'RUST_BACKTRACE=1'])
+ 
+-meson.add_postconf_script(find_program('scripts/symlink-install-tree.py'))
++if host_machine.system() != 'windows'
++  meson.add_postconf_script(find_program('scripts/symlink-install-tree.py'))
++endif
+ 
+ ####################
+ # Global variables #

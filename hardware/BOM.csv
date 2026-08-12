@@ -1,0 +1,25 @@
+category,item,model,spec,qty_per_unit,unit_price,extended,notes
+physical_host,Chassis,Supermicro SYS-741GE-TNRT,4U 8-GPU rack,1,1500,1500,Host machine that runs the worker VMs
+physical_host,Motherboard,Supermicro H13DSG-O-CPU,Dual-socket PCIe 5.0,1,2200,2200,
+physical_host,CPU,AMD EPYC 9654,96-core 2.4GHz 400W,2,6500,13000,
+physical_host,RAM,Samsung DDR5-4800 ECC RDIMM,64GB modules,24,400,9600,Shared host RAM; partitioned into VM vRAM
+physical_host,Boot SSD,Crucial T700 NVMe PCIe 5.0,1TB,2,180,360,
+physical_host,Data SSD,Solidigm D5-P5336 U.2 NVMe,7.68TB,4,1200,4800,Backing store for VM root + output PVCs
+physical_host,GPU,NVIDIA H100 80GB PCIe,or H200,4,25000,100000,Passed through to VMs via vfio-pci
+physical_host,InfiniBand,NVIDIA ConnectX-7 400Gbps dual-port,host interconnect,2,2500,5000,
+physical_host,Power Supply,Supermicro PWS-2K02-1R,2000W 80+ Platinum,4,800,3200,
+physical_host,Cooling,High-CFM fan kit,chassis,1,1000,1000,
+physical_host,Cabling,Cable kit,GPU power / IB / patch,1,500,500,
+physical_host,TOTAL,,,,,141160,Per physical host (4 GPUs)
+inventory,Physical hosts,,,,,2,282320,2 hosts -> 8 physical GPUs
+vm,Control Plane VM,cogniforge-cp,vCPU:8 RAM:16G Disk:200G GPU:none,1,0,0,Hosts RKE2 server + Rack Engine + Argo
+vm,GPU Worker VM,cogniforge-worker-01,vCPU:16 RAM:128G Disk:1T GPU:1x H100 (passthrough),1,0,0,Gets 1 physical GPU via vfio
+vm,GPU Worker VM,cogniforge-worker-02,vCPU:16 RAM:128G Disk:1T GPU:1x H100 (passthrough),1,0,0,
+vm,GPU Worker VM,cogniforge-worker-03,vCPU:16 RAM:128G Disk:1T GPU:1x H100 (passthrough),1,0,0,
+vm,GPU Worker VM,cogniforge-worker-04,vCPU:16 RAM:128G Disk:1T GPU:1x H100 (passthrough),1,0,0,
+vm,GPU Worker VM,cogniforge-worker-05,vCPU:16 RAM:128G Disk:1T GPU:1x H100 (passthrough),1,0,0,
+vm,GPU Worker VM,cogniforge-worker-06,vCPU:16 RAM:128G Disk:1T GPU:1x H100 (passthrough),1,0,0,
+vm,GPU Worker VM,cogniforge-worker-07,vCPU:16 RAM:128G Disk:1T GPU:1x H100 (passthrough),1,0,0,
+vm,GPU Worker VM,cogniforge-worker-08,vCPU:16 RAM:128G Disk:1T GPU:1x H100 (passthrough),1,0,0,
+vm,TOTAL GPU capacity,,,,8,0,0,8 worker VMs x 1 GPU each
+cluster,TOTAL,,,,,,282320,Optional IB switch (~20k) if >2 hosts

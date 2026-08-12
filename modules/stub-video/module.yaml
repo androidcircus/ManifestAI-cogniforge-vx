@@ -1,0 +1,29 @@
+id: stub-video
+name: Placeholder Video (no GPU)
+version: 1.0.0
+description: Emulator-safe video generator. Produces a real MP4 from procedural frames so the pipeline/UI flow can be tested end-to-end without a GPU.
+category: generation
+icon: video
+image: manifestai/stub-video:latest
+
+inputs:
+  - name: image_url
+    type: string
+    required: true
+    description: Used only as a deterministic color/pattern seed in stub mode.
+  - name: duration
+    type: integer
+    default: 5
+    min: 1
+    max: 30
+    description: Video length in seconds.
+
+outputs:
+  - name: video_file
+    type: file
+    format: mp4
+
+resources:
+  gpu: 0
+  memory: 512Mi
+  cpu: 1

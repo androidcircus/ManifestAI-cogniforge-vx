@@ -1,0 +1,36 @@
+# monitoring/prometheus-config.yaml
+# Extra scrape configs to mount into the kube-prometheus-stack Prometheus
+# (as a secret referenced by prometheusSpec.additionalScrapeConfigs).
+#
+# Install via Helm:
+#   helm install monitoring prometheus-community/kube-prometheus-stack \
+#     -n monitoring --create-namespace \
+#     --set prometheus.prometheusSpec.additionalScrapeConfigsSecret.enabled=true \
+#     --set prometheus.prometheusSpec.additionalScrapeConfigsSecret.name=rack-scrape \
+#     --set prometheus.prometheusSpec.additionalScrapeConfigsSecret.key=config
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rack-scrape
+  namespace: monitoring
+stringData:
+  config: |
+    - job_name: rack-engine
+      metrics_path: /metrics
+      static_configs:
+        - targets: ["rack-engine-backend.default:8000"]
+
+    - job_name: argo-workflows
+      metrics_path: /metrics
+      static_configs:
+        - targets: ["argo-workflows-server.argo:2746"]
+
+    - job_name: wan21-modules
+      kubernetes_sd_configs:
+        - role: pod
+          namespaces:
+            names: [default]
+      relabel_configs:
+        - source_labels: [__meta_kubernetes_pod_label_app]
+          regex: wan21
+          action: keep

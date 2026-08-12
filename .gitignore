@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Node / frontend
+node_modules/
+dist/
+build/
+.env.local
+
+# Generated artifacts
+*.mp4
+*.txt
+videos/
+
+# Kube config / secrets
+kubeconfig
+*.key
+*.pem
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

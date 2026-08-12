@@ -1,0 +1,65 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+#
+# provisioning/Vagrantfile
+# Creates the virtual-machine GPU cluster on KVM/libvirt:
+#   * cogniforge-cp            - control plane VM (RKE2 server, Argo, Rack Engine)
+#   * cogniforge-worker-01..N  - GPU worker VMs (physical GPU attached post-up)
+#
+# Requirements on the host: vagrant, vagrant-libvirt, qemu-kvm, libvirt, dnsmasq.
+#
+# Usage:
+#   WORKER_COUNT=8 vagrant up
+#   # attach physical GPUs to the worker VMs (required for real inference):
+#   ./scripts/attach-gpu.sh
+#
+# GPU passthrough notes: see gpu-passthrough.md. Workers are created WITHOUT
+# a GPU first (so the VMs boot reliably); the physical device is hot-plugged
+# with virsh attach-device afterwards. Hot-adding an H100 requires a reboot of
+# the worker VM (virsh reboot cogniforge-worker-NN) before the device shows up.
+
+BOX          = "generic/ubuntu2404"
+MANAGEMENT_CIDR = "192.168.121.0/24"
+
+CP_RAM  = (ENV["CP_RAM"]  || "16384").to_i      # MB
+CP_CPU  = (ENV["CP_CPU"]  || "8").to_i
+WK_RAM  = (ENV["WK_RAM"]  || "131072").to_i     # MB - 128 GiB per worker
+WK_CPU  = (ENV["WK_CPU"]  || "16").to_i
+WK_DISK = (ENV["WK_DISK"] || "40").to_i         # GB (output volume is separate)
+
+WORKER_COUNT = (ENV["WORKER_COUNT"] || "8").to_i
+
+Vagrant.configure("2") do |config|
+  config.vm.box = BOX
+  config.vm.network "private_network", type: "dhcp"
+  config.ssh.forward_agent = true
+
+  # --- Control plane --------------------------------------------------------
+  config.vm.define "cogniforge-cp", primary: true do |cp|
+    cp.vm.hostname = "cogniforge-cp"
+    cp.vm.provider :libvirt do |lv|
+      lv.memory = CP_RAM
+      lv.cpus = CP_CPU
+      lv.machine_virtual_size = 100
+      lv.disk_driver :cache => "none"
+    end
+    cp.vm.provision "shell", path: "cloud-init/control-plane.sh"
+  end
+
+  # --- GPU workers ----------------------------------------------------------
+  (1..WORKER_COUNT).each do |i|
+    name = format("cogniforge-worker-%02d", i)
+    config.vm.define name do |w|
+      w.vm.hostname = name
+      w.vm.provider :libvirt do |lv|
+        lv.memory = WK_RAM
+        lv.cpus = WK_CPU
+        lv.machine_virtual_size = 1024   # 1 TiB data disk for outputs
+        lv.disk_driver :cache => "none"
+      end
+      w.vm.provision "shell",
+        path: "cloud-init/worker.sh",
+        env: { "RKE2_URL" => "https://cogniforge-cp:9345" }
+    end
+  end
+end

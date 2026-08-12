@@ -1,0 +1,7 @@
+# workflows/example-parameters.yaml
+# Example parameter values for the video-pipeline workflow.
+#
+#   argo submit --watch -n default -f workflows/video-pipeline.yaml \
+#     --parameter-file workflows/example-parameters.yaml
+image_url: https://images.example.com/robot-studio.jpg
+duration: "8"

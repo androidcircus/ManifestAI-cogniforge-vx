@@ -1,0 +1,38 @@
+# kubernetes/gpu-operator-values.yaml
+# Helm values for the NVIDIA GPU Operator.
+#
+# Install:
+#   helm install gpu-operator nvidia/gpu-operator \
+#     -n gpu-operator --create-namespace -f gpu-operator-values.yaml
+#
+# Workers in this cluster receive one FULL physical GPU each (PCI passthrough),
+# so MIG stays disabled by default. Set mig.strategy=mixed below and
+# nodeSelector.mig to a pool if you want to slice GPUs into MIG instances.
+
+driver:
+  enabled: true
+  upgradeCRDs: true
+
+toolkit:
+  enabled: true
+
+devicePlugin:
+  enabled: true
+
+dcgmExporter:
+  enabled: true
+
+mig:
+  strategy: "none"           # set to "mixed" to enable MIG slicing
+  # sliceGPUs: false
+
+# nodeSelector:
+#   mig: "true"              # only schedule device plugin on MIG workers
+
+operator:
+  defaultRuntime: containerd
+
+# --- Metrics endpoint used by Prometheus scraping --------------------------
+dcgmExporter:
+  serviceMonitor:
+    enabled: true

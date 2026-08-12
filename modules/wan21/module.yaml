@@ -1,0 +1,33 @@
+id: wan21
+name: Wan21-VideoGenerator
+version: 1.0.0
+description: Generates video from an image using Wan 2.1 (image-to-video).
+category: generation
+icon: video
+image: manifestai/wan21:latest
+
+inputs:
+  - name: image_url
+    type: string
+    required: true
+    description: HTTP(S) URL of the input image.
+  - name: duration
+    type: integer
+    default: 5
+    min: 1
+    max: 30
+    description: Video length in seconds (Wan 2.1 steps scale with length).
+
+outputs:
+  - name: video_file
+    type: file
+    format: mp4
+
+resources:
+  gpu: 1
+  memory: 32Gi
+  cpu: 8
+
+ports:
+  - containerPort: 8000
+    protocol: TCP

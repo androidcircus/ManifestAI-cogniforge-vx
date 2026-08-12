@@ -1,0 +1,13 @@
+# rack-engine/backend/config.yaml
+# Runtime configuration for the Rack Engine API.
+
+namespace: default            # Kubernetes namespace for Argo Workflows
+argo_host: http://argo-workflows-server.argo:2746   # Argo server service
+image_registry: manifestai    # container registry prefix for module images
+storage_class: local-nvme     # StorageClass for pipeline output PVCs
+output_pvc: rack-outputs      # shared PVC mounted at /app/outputs
+
+modules_dir: /modules         # where module.yaml definitions live
+output_dir: /app/outputs      # where finished videos are expected
+
+# Overridable via env: RACK_ENGINE_CONFIG points at an alternate config file.

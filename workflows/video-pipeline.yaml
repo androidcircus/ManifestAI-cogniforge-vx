@@ -1,0 +1,73 @@
+# workflows/video-pipeline.yaml
+# Argo Workflow template for a single Wan 2.1 image-to-video generation.
+#
+# The step runs the module's CLI (generate.py) so the container exits after
+# producing the mp4, then archives the file as a workflow artifact.
+#
+# Submit manually:
+#   argo submit --watch -n default -f workflows/video-pipeline.yaml \
+#     -p image_url=https://example.com/cat.jpg -p duration=5
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: rack-video-pipeline-
+spec:
+  entrypoint: main
+  arguments:
+    parameters:
+      - name: image_url
+        value: https://example.com/cat.jpg
+      - name: duration
+        value: "5"
+
+  volumes:
+    - name: outputs
+      persistentVolumeClaim:
+        claimName: rack-outputs
+
+  templates:
+    - name: main
+      steps:
+        - - name: generate-video
+            template: wan21-generate
+
+    - name: wan21-generate
+      inputs:
+        parameters:
+          - name: image_url
+          - name: duration
+      container:
+        image: manifestai/wan21:latest
+        command: ["python", "generate.py"]
+        args:
+          - "--image-url"
+          - "{{inputs.parameters.image_url}}"
+          - "--duration"
+          - "{{inputs.parameters.duration}}"
+          - "--output"
+          - /mnt/outputs/out.mp4
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+            memory: 32Gi
+          requests:
+            nvidia.com/gpu: 1
+            memory: 32Gi
+        volumeMounts:
+          - name: outputs
+            mountPath: /mnt/outputs
+      outputs:
+        artifacts:
+          - name: video
+            path: /mnt/outputs/out.mp4
+            archive:
+              none: {}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nvidia.com/gpu.present
+                    operator: In
+                    values:
+                      - "true"
