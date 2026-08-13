@@ -1,0 +1,29 @@
+# rack-engine/backend/Dockerfile.render
+# Render-compatible image: same API image as the cluster Dockerfile, but also
+# bakes in modules/ so the demo API can register module defs without a
+# configMap volume mount. Build context MUST be the repo root.
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git curl && rm -rf /var/lib/apt/lists/*
+
+COPY rack-engine/backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY rack-engine/backend/app/ ./app/
+COPY rack-engine/backend/config.yaml .
+
+# Bake the module definitions (and the stub-video generator sources) in so the
+# API can list and describe modules without the Kubernetes configMap.
+COPY modules/ /modules
+
+ENV RACK_MODULES_DIR=/modules \
+    RACK_OUTPUT_DIR=/app/outputs
+
+RUN mkdir -p /app/outputs
+
+EXPOSE 8000
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

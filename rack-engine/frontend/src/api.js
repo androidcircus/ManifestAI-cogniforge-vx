@@ -1,7 +1,8 @@
 import axios from "axios";
 
 const API_BASE = process.env.REACT_APP_API_BASE || "http://localhost:8000";
-export const WS_BASE = process.env.REACT_APP_WS_BASE || "ws://localhost:8000/ws";
+export const WS_BASE =
+  process.env.REACT_APP_WS_BASE || `${API_BASE.replace(/^http/, "ws")}/ws`;
 
 export async function fetchModules() {
   const { data } = await axios.get(`${API_BASE}/modules`);

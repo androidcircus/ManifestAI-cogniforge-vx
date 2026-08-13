@@ -15,14 +15,17 @@ web UI, submitted to Argo Workflows on RKE2, and executed on GPU worker VMs
 ```
 hardware/            VM-based resource plan (BOM.csv) and rack layout
 network/             InfiniBand host setup + management network IPs
-provisioning/        Vagrant + cloud-init that create the cluster VMs
+provisioning/        Vagrant, cloud-init, QEMU emulator, and AWS (EC2 + Terraform)
 kubernetes/          RKE2 install, NVIDIA GPU Operator, local storage
 rack-engine/         FastAPI backend + React/react-flow frontend
 modules/wan21/       Wan 2.1 inference module (API + CLI + Docker)
+modules/stub-video/  CPU-only placeholder generator (no-GPU / dev path)
 workflows/           Argo Workflow templates
 monitoring/          Prometheus config + Grafana dashboards
-scripts/             deploy-cluster.sh and test-generation.sh
-docs/                quickstart.md and architecture.md
+scripts/             deploy / build-images / test / push-to-github / make-release
+notebooks/           Colab + base44 demo notebook (stub-video + GEMM kernel)
+docs/                quickstart.md, architecture.md, cloud-gpu.md
+render.yaml          Render Blueprint (API + dashboard)
 ```
 
 ## Quick start
@@ -33,6 +36,24 @@ See [docs/quickstart.md](docs/quickstart.md). High level:
 2. Install RKE2 + GPU Operator: run `kubernetes/rke2-install.sh` on the control plane
 3. Deploy the stack: `scripts/deploy-cluster.sh`
 4. Test: `scripts/test-generation.sh`
+
+## Deploy targets
+
+| Target | Artifact | Docs |
+|--------|----------|------|
+| VM cluster (KVM/libvirt) | `provisioning/Vagrantfile` | `docs/quickstart.md` |
+| AWS (EC2 + ECR) | `provisioning/ec2/bringup-ec2.sh`, `provisioning/ec2/terraform` | `docs/cloud-gpu.md` §1.6 |
+| Render (dashboard + API) | `render.yaml` | `scripts/deploy-cluster.sh` notes |
+| Colab / base44 | `notebooks/rack-demo.ipynb` | notebook intro |
+| No-GPU dev/emulation | `provisioning/emulator/*` + `modules/stub-video` | `provisioning/emulator/README.md` |
+
+## CI & releases
+
+- `./.github/workflows/ci.yml` runs GEMM, backend pytest, frontend build and the
+  stub-video smoke test on every push.
+- `./scripts/push-to-github.sh` pushes to `androidcircus/ManifestAI-cogniforge-vx`
+  (override with `REPO_URL` / first arg).
+- `./scripts/make-release.sh` tags a source zip into `dist/`.
 
 ## License
 

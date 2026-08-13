@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gemm:
+    name: CogniForge GPU GEMM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scalar kernel
+        run: |
+          gcc -O2 -Wall -Wextra -o /tmp/test-gemm \
+            provisioning/emulator/test-gemm.c provisioning/emulator/cogniforge-gemm.c
+          /tmp/test-gemm
+      - name: AVX-512 kernel (only on capable runners)
+        if: runner.os == 'Linux' && hashFiles('provisioning/emulator/cogniforge-gemm.c') != ''
+        run: |
+          set -e
+          if grep -q avx512f /proc/cpuinfo; then
+            gcc -O2 -mavx512f -Wall -Wextra -o /tmp/test-gemm-avx512 \
+              provisioning/emulator/test-gemm.c provisioning/emulator/cogniforge-gemm.c
+            /tmp/test-gemm-avx512
+          else
+            echo "runner CPU has no AVX-512; skipping vector kernel"
+          fi
+
+  backend:
+    name: Rack Engine API
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rack-engine/backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install --quiet -r requirements.txt pytest
+      - name: Tests
+        run: pytest -q
+
+  frontend:
+    name: Rack Engine frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rack-engine/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install deps
+        run: npm install
+      - name: Production build
+        run: |
+          CI=true npm run build
+
+  stub-video:
+    name: stub-video smoke (no GPU)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: modules/stub-video
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install --quiet -r requirements.txt
+      - name: Generate a video
+        run: |
+          python generate.py --image-url "https://example.com/seed.png" \
+            --duration 1 --fps 8 --width 332 --height 332 \
+            --output /tmp/stub-out.mp4
+          test -s /tmp/stub-out.mp4
+          echo "produced $(stat -c%s /tmp/stub-out.mp4) bytes"

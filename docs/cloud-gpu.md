@@ -42,6 +42,74 @@ To actually use tier-2 nodes, add a module that fits (e.g. a quantized or
 1B-class video model) with its own `node_selector` and `gpu: 1`; the same
 `resources` + `node_selector` fields drive everything.
 
+## 1.6 AWS bring-up, step by step (console + CLI)
+
+The fastest path is `provisioning/ec2/bringup-ec2.sh` (see
+`provisioning/ec2/README.md`) or the Terraform module for the same layout.
+This is the manual equivalent.
+
+**Console — create a key pair + instance (tier3 example):**
+1. EC2 → Key Pairs → Create → download the `.pem`.
+2. EC2 → Instances → Launch. Pick **Amazon Linux 2023** AMI.
+3. For the control plane choose `t3.medium`; for a GPU worker choose
+   `p4d.24xlarge` (A100 40GB) or `p5.48xlarge` (H100 80GB) — tier3.
+   For a cheap demo choose `g4dn.xlarge` (16GB) — tier2, no 14B model.
+4. Instance Type → Configure: attach your key pair, allow SSH.
+5. Security Group: open **22**, **6443**, **9345**, **30000–32767** to your IP
+   (or the rack's CIDR).
+6. Storage: 60GB root for the CP, 200GB for GPU nodes (model weights).
+7. IAM: assign the instance profile with `AmazonEC2ContainerRegistryPowerUser`
+   so `aws ecr get-login-password` works without keys.
+8. Advanced → User data: leave empty — SSH in after boot and run
+   `bringup-ec2.sh` yourself (or use the Terraform module, which injects
+   `user_data` automatically).
+9. Launch. Then run `bringup-ec2.sh` on the CP as root.
+
+**CLI (equivalent, from your laptop):**
+
+```bash
+aws ec2 run-instances --image-id $(aws ec2 describe-images --owners amazon \
+  --filters 'Name=name,Values=al2023-ami-2023.*-x86_64' --query 'reverse(sort_by(Images,&CreationDate))[0].ImageId' --output text) \
+  --instance-type p4d.24xlarge --key-name my-key \
+  --security-group-ids <sg> --subnet-id <subnet> --iam-instance-profile Name=cogniforge-rack-node \
+  --block-device-mappings 'DeviceName=/dev/xvda,Ebs={VolumeSize=200}' \
+  --user-data "$(cat provisioning/ec2/bringup-ec2.sh)"
+```
+
+**ECR — create the repos and push images:**
+
+```bash
+aws ecr create-repository --repository-name cogniforge/rack-engine
+aws ecr create-repository --repository-name cogniforge/wan21
+aws ecr create-repository --repository-name cogniforge/stub-video
+aws ecr create-repository --repository-name cogniforge/rack-engine-frontend
+aws ecr create-repository --repository-name cogniforge/base
+# push (on a machine with Docker + this repo):
+REGISTRY=$(aws ecr describe-repositories --query 'repositories[?repositoryName==`cogniforge/rack-engine`].repositoryUri' --output text | sed 's#/rack-engine##')
+REGISTRY=$REGISTRY ./scripts/build-images.sh
+```
+
+**On the CP instance:**
+
+```bash
+sudo su -
+REGION=us-east-1 \
+REGISTRY=<ecr-prefix-without-repo-name> \
+NODE_TIER=tier1 RKE2_TOKEN=CHANGE_ME \
+bash /opt/cogniforge-rack/provisioning/ec2/bringup-ec2.sh
+```
+
+The script ends with `kubectl get nodes -o wide`. From your laptop:
+
+```bash
+scp -i my-key.pem ec2-user@<cp-ip>:/etc/rancher/rke2/rke2.yaml .
+kubectl --kubeconfig ./rke2.yaml get nodes -o wide
+curl http://<cp-ip>:$(kubectl --kubeconfig ./rke2.yaml get svc -n default rack-engine-backend -o jsonpath='{.spec.ports[0].nodePort}')
+```
+
+Expose the API/frontend NodePorts (30080/30081) to the internet through the SG
+if the UI must be reachable beyond your IP.
+
 ## 2. Install the NVIDIA GPU Operator (drivers + device plugin)
 
 On the control plane, with a kubeconfig:

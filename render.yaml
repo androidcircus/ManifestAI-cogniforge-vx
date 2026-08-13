@@ -1,0 +1,43 @@
+# render.yaml
+# CogniForge Rack — Render Blueprint.
+#
+# Deploys the Rack Engine API (Docker) and the React dashboard (static site)
+# from a GitHub repo. The API works standalone for module browsing / demoing;
+# submitting real video pipelines requires a connected cluster (see
+# docs/cloud-gpu.md) whose Argo server the API points at via RACK_ENGINE_CONFIG.
+#
+# In the Render dashboard: New -> Blueprint -> select your repo.
+
+services:
+  - type: web
+    name: cogniforge-rack-api
+    runtime: docker
+    repo: https://github.com/androidcircus/ManifestAI-cogniforge-vx
+    rootDir: .
+    dockerfilePath: rack-engine/backend/Dockerfile.render
+    plan: free
+    envVars:
+      - key: RACK_ENGINE_CONFIG
+        value: /app/config.yaml
+      - key: RACK_MODULES_DIR
+        value: /modules
+      - key: RACK_OUTPUT_DIR
+        value: /app/outputs
+    autoDeploy: true
+
+  - type: static
+    name: cogniforge-rack-ui
+    runtime: static
+    repo: https://github.com/androidcircus/ManifestAI-cogniforge-vx
+    rootDir: rack-engine/frontend
+    buildCommand: npm install && npm run build
+    publishPath: build
+    envVars:
+      - key: REACT_APP_API_BASE
+        fromService:
+          name: cogniforge-rack-api
+          type: web
+          property: url
+      # WS_URL derives from the API base automatically (api.js), so no
+      # REACT_APP_WS_BASE is needed here.
+    autoDeploy: true

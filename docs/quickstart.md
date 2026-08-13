@@ -94,6 +94,17 @@ cd rack-engine/frontend && npm install && npm start
 qemu-system-x86_64 ... -device cogniforge-gpu,sm_count=256,vram_size=2G
 ```
 
+## 7. Other run targets
+
+| Target | How |
+|--------|-----|
+| AWS EC2 (bring-up + Terraform) | `provisioning/ec2/README.md` + `docs/cloud-gpu.md` §1.6 |
+| Render (API + dashboard) | push to GitHub, then **New → Blueprint** with `render.yaml` |
+| Colab / base44 | open `notebooks/rack-demo.ipynb` (or its GitHub raw/`open-in-colab` link) |
+| CI | `.github/workflows/ci.yml` runs GEMM, pytest, frontend build, stub-video smoke |
+| Release | `./scripts/make-release.sh` → `dist/cogniforge-rack-vX.Y.Z.zip` |
+| GitHub push | `GH_TOKEN=… ./scripts/push-to-github.sh` |
+
 ## Troubleshooting
 
 | Symptom | Fix |
