@@ -14,10 +14,35 @@ covers switching on real compute.
   or an in-cluster one such as `registry:2`).
 
 Managed Kubernetes (EKS/GKE/AKS) works too: provision a GPU node pool and
-skip step 1 (drivers usually come preinstalled on the AMI/image) — go straight
-to step 2.
+skip section 2 (drivers usually come preinstalled on the AMI/image) — go straight
+to section 4.
 
-## 1. Install the NVIDIA GPU Operator (drivers + device plugin)
+## 1.5 Running all three tiers in one cluster
+
+The rack is designed for a **mixed node pool** — one cluster, three tiers:
+
+| Tier | Node | Runs |
+|------|------|------|
+| 1 | CPU-only (control plane or small worker) | Infra, `stub-video`, CPU jobs |
+| 2 | GPU with 16–24GB VRAM (g4dn/A10G/L4/T4) | Smaller/quantized models; currently idle for the 14B model |
+| 3 | GPU with 40GB+ VRAM (p4d A100, p5 H100) | `wan21` (14B) |
+
+`wan21/module.yaml` declares a `node_selector` (`cogniforge.rack/tier: tier3`)
+so its pods never land on a 24GB tier-2 node. The scheduler copies that into
+the Argo template; modules without one (e.g. `stub-video`) schedule anywhere.
+
+Label the nodes accordingly:
+
+```bash
+kubectl label node <gpu-node-40gb> cogniforge.rack/tier=tier3
+kubectl label node <gpu-node-24gb> cogniforge.rack/tier=tier2
+```
+
+To actually use tier-2 nodes, add a module that fits (e.g. a quantized or
+1B-class video model) with its own `node_selector` and `gpu: 1`; the same
+`resources` + `node_selector` fields drive everything.
+
+## 2. Install the NVIDIA GPU Operator (drivers + device plugin)
 
 On the control plane, with a kubeconfig:
 
@@ -45,15 +70,18 @@ If you want to slice GPUs into MIG instances (share one A100/H100 between
 several modules), set `mig.strategy: mixed` and follow the MIG page in the
 operator docs; each module still requests whole-GPU `nvidia.com/gpu` units.
 
-## 2. Node labels (optional)
+## 3. Node labels (optional)
 
-Label nodes by tier so modules can be steered with a nodeSelector later:
+For a single-GPU cluster, a simple boolean is enough:
 
 ```bash
 kubectl label node gpu-worker-01 cogniforge.rack/gpu=true
 ```
 
-## 3. Install Argo Workflows
+For mixed tier-1/tier-2/tier-3 pools, use `cogniforge.rack/tier=tier2|tier3`
+instead (see section 1.5) so the wan21 `node_selector` works out of the box.
+
+## 4. Install Argo Workflows
 
 If you are not using `kubernetes/rke2-install.sh` (which installs Argo on the
 server), deploy it the usual way:
@@ -66,7 +94,7 @@ kubectl apply -n argo -f https://github.com/argoproj/argo-workflows/releases/dow
 The backend expects `argo-workflows-server` at
 `http://argo-workflows-server.argo:2746` (see `rack-engine/backend/config.yaml`).
 
-## 4. Build and push the images
+## 5. Build and push the images
 
 ```bash
 REGISTRY=my.registry.example.com/cogniforge ./scripts/build-images.sh
@@ -79,7 +107,7 @@ deploy with the **same** `REGISTRY` (plus `IMAGE_TAG` if you did not use
 module definitions to `${REGISTRY}/<module>:<tag>` so Argo steps pull from
 exactly where you pushed:
 
-## 5. Deploy
+## 6. Deploy
 
 ```bash
 export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
@@ -90,7 +118,7 @@ REGISTRY=my.registry.example.com/cogniforge ./scripts/deploy-cluster.sh
 `rack-modules` configMap (so the backend discovers `wan21` and `stub-video`
 at startup), deploys the backend + frontend, and registers the modules.
 
-## 6. Generate
+## 7. Generate
 
 Real GPU path:
 

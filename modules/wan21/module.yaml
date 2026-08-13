@@ -27,6 +27,11 @@ resources:
   gpu: 1
   memory: 32Gi
   cpu: 8
+  # Mixed-cluster safety: the 14B model needs ~40GB+ VRAM. Only run it on
+  # nodes labeled cogniforge.rack/tier=tier3 (e.g. p4d/p5 40-80GB). Tier-2
+  # 24GB nodes stay free for smaller/quantized models or other jobs.
+  node_selector:
+    cogniforge.rack/tier: tier3
 
 ports:
   - containerPort: 8000

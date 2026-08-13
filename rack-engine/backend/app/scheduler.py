@@ -87,6 +87,10 @@ def _build_workflow(cfg: Dict[str, Any], pipeline, modules_dir: str) -> Dict[str
     gpu = gpu if isinstance(gpu, int) and gpu > 0 else 0
     memory = mod_def.get("resources", {}).get("memory", "32Gi")
     cpu = mod_def.get("resources", {}).get("cpu", 4)
+    # Restrict which node tier runs this module. Nodes in a mixed cluster
+    # (GPU-less control plane, 24GB tier-2 GPUs, 40GB+ tier-3 GPUs) must be
+    # labeled so a 14B model never lands on a too-small GPU.
+    node_selector = mod_def.get("resources", {}).get("node_selector", {}) or {}
 
     resources = {
         "limits": {"memory": memory, "cpu": str(cpu)},
@@ -145,6 +149,7 @@ def _build_workflow(cfg: Dict[str, Any], pipeline, modules_dir: str) -> Dict[str
                             {"name": "duration"},
                         ]
                     },
+                    **({"nodeSelector": node_selector} if node_selector else {}),
                     "container": {
                         "image": image,
                         "command": ["python", "generate.py"],
