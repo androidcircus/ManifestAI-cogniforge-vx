@@ -53,8 +53,9 @@ echo "==> Validating token (identity is masked; your token stays out of the repo
 API="https://api.github.com/user"
 who="$(curl -fsS -H "Authorization: token ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "$API")"
 who_login="$(printf '%s' "$who" | grep -m1 '"login"' | sed -E 's/.*: *"([^"]+)".*/\1/')"
-who_name="$(printf '%s' "$who" | grep -m1 '"name"' | sed -E 's/.*: *"([^"]+)".*/\1/' || true)"
-echo "    authenticated as: ${who_name:-${who_login}}"
+who_name="$(printf '%s' "$who" | grep -m1 '"name"' | sed -E 's/.*: *"([^"]*)"[,}]?$/\1/' || true)"
+case "$who_name" in ""|null|*:* ) who_name="$who_login" ;; esac
+echo "    authenticated as: ${who_name}"
 if [ -n "$who_login" ] && [ "$who_login" != "$GITHUB_USER" ]; then
   echo "NOTE: token belongs to ${who_login}, not https://github.com/${GITHUB_USER}." >&2
   echo "      Continuing anyway (it will just target that account's repos)." >&2
@@ -72,6 +73,7 @@ done
 printf 'Choosing repo index (0-3) [0]: '
 read -r idx || idx=0
 idx="${idx:-0}"
+idx="${idx//$'\r'/}"   # strip CR from Windows/MSYS pipes
 if [ "$idx" = "0" ]; then REPO="$DEFAULT_REPO"; else REPO="${EXTRA_REPOS[$((idx-1))]}"; fi
 echo "    -> ${GITHUB_USER}/${REPO}"
 
