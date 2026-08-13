@@ -5,6 +5,11 @@ generation platform. Pipelines are composed from drag-and-drop modules in a
 web UI, submitted to Argo Workflows on RKE2, and executed on GPU worker VMs
 (Wan 2.1 for image-to-video generation).
 
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/androidcircus/ManifestAI-cogniforge-vx/HEAD/notebooks/rack-demo.ipynb)
+
+> **One-token setup** (GitHub + Render + Colab + base44):
+> `GH_TOKEN=<PAT> bash scripts/boot-onboarding.sh`
+
 > This is the "virtual machine GPU cluster" edition: the compute nodes are
 > KVM/libvirt VMs instead of physical servers. Each worker VM is assigned a
 > physical GPU (or a vGPU/MIG slice) via PCI passthrough. Everything else in
