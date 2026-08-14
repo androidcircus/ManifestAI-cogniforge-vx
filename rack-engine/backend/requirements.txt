@@ -1,0 +1,9 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+kubernetes==31.0.0
+argo-workflows==6.6.19
+pydantic==2.10.4
+redis==5.2.1
+websockets==14.1
+python-multipart==0.0.20
+pyyaml==6.0.2
